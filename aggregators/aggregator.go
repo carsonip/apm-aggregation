@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -49,10 +50,11 @@ type Aggregator struct {
 	db  *pebble.DB
 	cfg Config
 
-	mu             sync.Mutex
+	mu             sync.RWMutex
 	processingTime time.Time
 	batch          *pebble.Batch
 	cachedStats    map[time.Duration]map[[16]byte]stats
+	cachedStatsMu  sync.Mutex
 
 	stopping   chan struct{}
 	runStarted atomic.Bool
@@ -94,6 +96,7 @@ func New(opts ...Option) (*Aggregator, error) {
 				return &merger, nil
 			},
 		},
+		FS: vfs.NewStrictMem(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pebble db: %w", err)
@@ -136,8 +139,8 @@ func (a *Aggregator) AggregateBatch(
 ) error {
 	cmIDAttrs := a.cfg.CombinedMetricsIDToKVs(id)
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 
 	select {
 	case <-ctx.Done():
@@ -160,9 +163,11 @@ func (a *Aggregator) AggregateBatch(
 			}
 			totalBytesIn += int64(bytesIn)
 		}
+		a.cachedStatsMu.Lock()
 		cmStats := a.cachedStats[ivl][id]
 		cmStats.eventsTotal += float64(len(*b))
 		a.cachedStats[ivl][id] = cmStats
+		a.cachedStatsMu.Unlock()
 	}
 
 	cmIDAttrSet := attribute.NewSet(cmIDAttrs...)
@@ -191,8 +196,8 @@ func (a *Aggregator) AggregateCombinedMetrics(
 	ctx, span := a.cfg.Tracer.Start(ctx, "AggregateCombinedMetrics", trace.WithAttributes(traceAttrs...))
 	defer span.End()
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 
 	select {
 	case <-ctx.Done():
@@ -204,6 +209,7 @@ func (a *Aggregator) AggregateCombinedMetrics(
 
 	bytesIn, err := a.aggregate(ctx, cmk, cm)
 
+	a.cachedStatsMu.Lock()
 	if _, ok := a.cachedStats[cmk.Interval]; !ok {
 		// Protection for stats collected from a different instance
 		// of aggregator as aggregators can be chained.
@@ -212,6 +218,7 @@ func (a *Aggregator) AggregateCombinedMetrics(
 	cmStats := a.cachedStats[cmk.Interval][cmk.ID]
 	cmStats.eventsTotal += cm.eventsTotal
 	a.cachedStats[cmk.Interval][cmk.ID] = cmStats
+	a.cachedStatsMu.Unlock()
 
 	span.SetAttributes(attribute.Int("bytes_ingested", bytesIn))
 	cmIDAttrSet := attribute.NewSet(cmIDAttrs...)
@@ -375,13 +382,9 @@ func (a *Aggregator) aggregate(
 	cmproto := cm.ToProto()
 	defer cmproto.ReturnToVTPool()
 
-	if a.batch == nil {
-		// Batch is backed by a sync pool. After each commit we will release the batch
-		// back to the pool by calling Batch#Close and subsequently acquire a new batch.
-		a.batch = a.db.NewBatch()
-	}
+	batch := a.db.NewBatch()
 
-	op := a.batch.MergeDeferred(cmk.SizeBinary(), cmproto.SizeVT())
+	op := batch.MergeDeferred(cmk.SizeBinary(), cmproto.SizeVT())
 	if err := cmk.MarshalBinaryToSizedBuffer(op.Key); err != nil {
 		return 0, fmt.Errorf("failed to marshal combined metrics key: %w", err)
 	}
@@ -393,14 +396,11 @@ func (a *Aggregator) aggregate(
 	}
 
 	bytesIn := cmproto.SizeVT()
-	if a.batch.Len() >= dbCommitThresholdBytes {
-		if err := a.batch.Commit(pebble.Sync); err != nil {
-			return bytesIn, fmt.Errorf("failed to commit pebble batch: %w", err)
-		}
-		if err := a.batch.Close(); err != nil {
-			return bytesIn, fmt.Errorf("failed to close pebble batch: %w", err)
-		}
-		a.batch = nil
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return bytesIn, fmt.Errorf("failed to commit pebble batch: %w", err)
+	}
+	if err := batch.Close(); err != nil {
+		return bytesIn, fmt.Errorf("failed to close pebble batch: %w", err)
 	}
 	return bytesIn, nil
 }
