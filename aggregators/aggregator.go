@@ -96,7 +96,7 @@ func New(opts ...Option) (*Aggregator, error) {
 				return &merger, nil
 			},
 		},
-		FS: vfs.NewStrictMem(),
+		FS: vfs.NewMem(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pebble db: %w", err)
