@@ -150,6 +150,8 @@ func (a *Aggregator) AggregateBatch(
 	default:
 	}
 
+	batch := a.db.NewBatch()
+
 	var errs []error
 	var totalBytesIn int64
 	cmk := CombinedMetricsKey{ID: id}
@@ -157,7 +159,7 @@ func (a *Aggregator) AggregateBatch(
 		cmk.ProcessingTime = a.processingTime.Truncate(ivl)
 		cmk.Interval = ivl
 		for _, e := range *b {
-			bytesIn, err := a.aggregateAPMEvent(ctx, cmk, e)
+			bytesIn, err := a.aggregateAPMEvent(ctx, cmk, e, batch)
 			if err != nil {
 				errs = append(errs, err)
 			}
@@ -169,6 +171,9 @@ func (a *Aggregator) AggregateBatch(
 		a.cachedStats[ivl][id] = cmStats
 		a.cachedStatsMu.Unlock()
 	}
+
+	batch.Commit(pebble.Sync)
+	batch.Close()
 
 	cmIDAttrSet := attribute.NewSet(cmIDAttrs...)
 	a.metrics.RequestsTotal.Add(ctx, 1, metric.WithAttributeSet(cmIDAttrSet))
@@ -207,7 +212,10 @@ func (a *Aggregator) AggregateCombinedMetrics(
 	default:
 	}
 
-	bytesIn, err := a.aggregate(ctx, cmk, cm)
+	batch := a.db.NewBatch()
+	bytesIn, err := a.aggregate(ctx, cmk, cm, batch)
+	batch.Commit(pebble.Sync)
+	batch.Close()
 
 	a.cachedStatsMu.Lock()
 	if _, ok := a.cachedStats[cmk.Interval]; !ok {
@@ -356,6 +364,7 @@ func (a *Aggregator) aggregateAPMEvent(
 	ctx context.Context,
 	cmk CombinedMetricsKey,
 	e *modelpb.APMEvent,
+	batch *pebble.Batch,
 ) (int, error) {
 	kvs, err := EventToCombinedMetrics(e, cmk, a.cfg.Partitioner)
 	if err != nil {
@@ -363,7 +372,7 @@ func (a *Aggregator) aggregateAPMEvent(
 	}
 	var totalBytesIn int
 	for cmk, cm := range kvs {
-		bytesIn, err := a.aggregate(ctx, cmk, *cm)
+		bytesIn, err := a.aggregate(ctx, cmk, *cm, batch)
 		totalBytesIn += bytesIn
 		if err != nil {
 			return totalBytesIn, fmt.Errorf("failed to aggregate combined metrics: %w", err)
@@ -378,11 +387,10 @@ func (a *Aggregator) aggregate(
 	ctx context.Context,
 	cmk CombinedMetricsKey,
 	cm CombinedMetrics,
+	batch *pebble.Batch,
 ) (int, error) {
 	cmproto := cm.ToProto()
 	defer cmproto.ReturnToVTPool()
-
-	batch := a.db.NewBatch()
 
 	op := batch.MergeDeferred(cmk.SizeBinary(), cmproto.SizeVT())
 	if err := cmk.MarshalBinaryToSizedBuffer(op.Key); err != nil {
@@ -396,12 +404,6 @@ func (a *Aggregator) aggregate(
 	}
 
 	bytesIn := cmproto.SizeVT()
-	if err := batch.Commit(pebble.Sync); err != nil {
-		return bytesIn, fmt.Errorf("failed to commit pebble batch: %w", err)
-	}
-	if err := batch.Close(); err != nil {
-		return bytesIn, fmt.Errorf("failed to close pebble batch: %w", err)
-	}
 	return bytesIn, nil
 }
 
