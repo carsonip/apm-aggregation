@@ -172,7 +172,7 @@ func (a *Aggregator) AggregateBatch(
 		a.cachedStatsMu.Unlock()
 	}
 
-	batch.Commit(pebble.Sync)
+	batch.Commit(pebble.NoSync)
 	batch.Close()
 
 	cmIDAttrSet := attribute.NewSet(cmIDAttrs...)
@@ -214,7 +214,7 @@ func (a *Aggregator) AggregateCombinedMetrics(
 
 	batch := a.db.NewBatch()
 	bytesIn, err := a.aggregate(ctx, cmk, cm, batch)
-	batch.Commit(pebble.Sync)
+	batch.Commit(pebble.NoSync)
 	batch.Close()
 
 	a.cachedStatsMu.Lock()
