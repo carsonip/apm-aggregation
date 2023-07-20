@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -155,6 +156,7 @@ func New(opts ...Option) (*Aggregator, error) {
 				return &merger, nil
 			},
 		},
+		FS: vfs.NewMem(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pebble db: %w", err)
