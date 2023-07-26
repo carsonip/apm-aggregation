@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
 	"github.com/elastic/apm-aggregation/aggregators/internal/telemetry"
+	"github.com/elastic/apm-aggregation/aggregators/internal/timestamppb"
 )
 
 const (
@@ -62,7 +64,7 @@ func New(opts ...Option) (*Aggregator, error) {
 		return nil, fmt.Errorf("failed to create aggregation config: %w", err)
 	}
 
-	pb, err := pebble.Open(cfg.DataDir, &pebble.Options{
+	pebbleOpts := &pebble.Options{
 		Merger: &pebble.Merger{
 			Name: "combined_metrics_merger",
 			Merge: func(_, value []byte) (pebble.ValueMerger, error) {
@@ -75,7 +77,14 @@ func New(opts ...Option) (*Aggregator, error) {
 				return &merger, nil
 			},
 		},
-	})
+	}
+	writeOptions := pebble.Sync
+	if cfg.InMemory {
+		pebbleOpts.FS = vfs.NewMem()
+		pebbleOpts.DisableWAL = true
+		writeOptions = pebble.NoSync
+	}
+	pb, err := pebble.Open(cfg.DataDir, pebbleOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pebble db: %w", err)
 	}
@@ -90,7 +99,7 @@ func New(opts ...Option) (*Aggregator, error) {
 
 	return &Aggregator{
 		db:             pb,
-		writeOptions:   pebble.Sync,
+		writeOptions:   writeOptions,
 		cfg:            cfg,
 		processingTime: time.Now().Truncate(cfg.AggregationIntervals[0]),
 		closed:         make(chan struct{}),
@@ -416,7 +425,7 @@ func (a *Aggregator) processHarvest(
 	if err := a.cfg.Processor(ctx, cmk, cm, aggIvl); err != nil {
 		return hs, fmt.Errorf("failed to process combined metrics ID %s: %w", cmk.ID, err)
 	}
-	hs.eventsTotal = cm.eventsTotal
-	hs.youngestEventTimestamp = cm.youngestEventTimestamp
+	hs.eventsTotal = cm.EventsTotal
+	hs.youngestEventTimestamp = timestamppb.PBTimestampToTime(cm.YoungestEventTimestamp)
 	return hs, nil
 }
