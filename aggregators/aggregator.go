@@ -14,6 +14,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
+	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -155,6 +156,57 @@ func (a *Aggregator) AggregateBatch(
 			}
 		}
 		a.cachedEvents.add(ivl, id, float64(len(*b)))
+	}
+
+	var err error
+	if len(errs) > 0 {
+		a.metrics.BytesProcessed.Add(context.Background(), failBytes, metric.WithAttributeSet(
+			attribute.NewSet(append(cmIDAttrs, telemetry.WithFailure())...),
+		))
+		err = fmt.Errorf("failed batch aggregation:\n%w", errors.Join(errs...))
+	}
+	a.metrics.BytesProcessed.Add(context.Background(), successBytes, metric.WithAttributeSet(
+		attribute.NewSet(append(cmIDAttrs, telemetry.WithSuccess())...),
+	))
+	return err
+}
+
+func (a *Aggregator) AggregateOTelLogs(
+	ctx context.Context,
+	id [16]byte,
+	logs plog.Logs,
+) error {
+	cmIDAttrs := a.cfg.CombinedMetricsIDToKVs(id)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.closed:
+		return ErrAggregatorClosed
+	default:
+	}
+
+	var (
+		errs                    []error
+		successBytes, failBytes int64
+	)
+	cmk := CombinedMetricsKey{ID: id}
+	for _, ivl := range a.cfg.AggregationIntervals {
+		cmk.ProcessingTime = a.processingTime.Truncate(ivl)
+		cmk.Interval = ivl
+
+		bytesIn, err := a.aggregateOTelLogs(ctx, cmk, logs)
+		if err != nil {
+			errs = append(errs, err)
+			failBytes += int64(bytesIn)
+		} else {
+			successBytes += int64(bytesIn)
+		}
+
+		a.cachedEvents.add(ivl, id, float64(logs.LogRecordCount()))
 	}
 
 	var err error

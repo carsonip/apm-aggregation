@@ -114,6 +114,12 @@ func (p *partitionedMetricsBuilder) processEvent(e *modelpb.APMEvent) {
 	}
 }
 
+func (p *partitionedMetricsBuilder) processOTelLogs() {
+	// All other event types should add an empty service metrics,
+	// for adding to service summary metrics.
+	p.addServiceSummaryMetrics()
+}
+
 func (p *partitionedMetricsBuilder) addTransactionMetrics(e *modelpb.APMEvent, count float64, duration time.Duration) {
 	var key aggregationpb.TransactionAggregationKey
 	setTransactionKey(e, &key)
