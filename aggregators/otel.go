@@ -141,7 +141,7 @@ func otelLogsToCombinedMetrics(
 	// Approximate events total by uniformly distributing the events total
 	// amongst the partitioned key values.
 	pmb.combinedMetrics.EventsTotal = 1 / float64(len(pmb.builders))
-	pmb.combinedMetrics.YoungestEventTimestamp = modelpb.FromTime(ts) // FIXME(carsonip): use observed timestamp
+	pmb.combinedMetrics.YoungestEventTimestamp = uint64(record.ObservedTimestamp().AsTime().UnixNano())
 
 	var errs []error
 	for _, mb := range pmb.builders {
